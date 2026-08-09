@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.dnl.appenv.pro"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.dnl.appenv.pro"
