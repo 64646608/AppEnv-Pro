@@ -22,12 +22,15 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK
+      - name: Setup current Android SDK tools
         uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '15859902'
+          packages: 'platform-tools'
 
       - name: Install Android SDKs
         run: |
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
           sdkmanager --channel=3 "platforms;android-37"
 
       - name: Setup Gradle 9.5.1
