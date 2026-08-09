@@ -14,6 +14,10 @@ android {
         versionName = "1.0.2-dev"
     }
 
+    sourceSets {
+        getByName("main").java.exclude("com/dnl/appenv/pro/xposed/ModuleMain.java")
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
