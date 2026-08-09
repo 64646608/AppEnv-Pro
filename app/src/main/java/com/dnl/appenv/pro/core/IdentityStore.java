@@ -12,6 +12,7 @@ public final class IdentityStore {
     private static final String PREF = "appenv_pro_identity";
     private static final String KEY_SEED = "seed";
     private static final String KEY_GENERATION = "generation";
+    private static final String KEY_SESSION_RESET_GENERATION = "session_reset_generation";
 
     private IdentityStore() {
     }
@@ -33,6 +34,18 @@ public final class IdentityStore {
         String oaid = UUID.nameUUIDFromBytes((seed + "|oaid").getBytes(StandardCharsets.UTF_8)).toString();
         String androidId = firstHex(seed + "|android_id", 16);
         return new Identity(seed, oaid, oaid, androidId, storedGeneration);
+    }
+
+    public static boolean isSessionResetPending(Context context, long generation) {
+        SharedPreferences prefs = context.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        return prefs.getLong(KEY_SESSION_RESET_GENERATION, Long.MIN_VALUE) != generation;
+    }
+
+    public static void markSessionResetConsumed(Context context, long generation) {
+        context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(KEY_SESSION_RESET_GENERATION, generation)
+                .commit();
     }
 
     private static String firstHex(String input, int chars) {
