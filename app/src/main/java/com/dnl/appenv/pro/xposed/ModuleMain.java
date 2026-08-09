@@ -24,7 +24,7 @@ public final class ModuleMain extends XposedModule {
   }
   @Override public void onPackageLoaded(PackageLoadedParam p){
     if(!p.isFirstPackage())return; String n=p.getPackageName(); if(!bool(n,"enabled",false))return; pkg=n;
-    mark("ENTRY","package="+n+" process="+p.getProcessName()); searchHook(p.getDefaultClassLoader()); attachHook(p.getDefaultClassLoader());
+    mark("ENTRY","package="+n); searchHook(p.getDefaultClassLoader()); attachHook(p.getDefaultClassLoader());
   }
   boolean bool(String p,String k,boolean d){try{return getRemotePreferences(PREF).getBoolean(p+"."+k,d);}catch(Throwable t){return d;}}
   long generation(String p){try{return getRemotePreferences(PREF).getLong(p+".generation",0L);}catch(Throwable t){return 0L;}}
@@ -56,8 +56,8 @@ public final class ModuleMain extends XposedModule {
     for(Method m:t.getDeclaredMethods()){if(m.getParameterCount()<1||m.getParameterTypes()[0]!=String.class)continue; String n=m.getName(); m.setAccessible(true);
       if((n.startsWith("get")||n.startsWith("decode"))&&(m.getReturnType()==String.class||CharSequence.class.isAssignableFrom(m.getReturnType()))){hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{
         String k=String.valueOf(c.getArg(0)); if(k.endsWith("store_key_oaid")){mark("MSTORE_ID","oaid="+id().oaid);return id().oaid;} if(k.endsWith("store_key_android_id")){mark("MSTORE_ID","androidId="+id().androidId);return id().androidId;}
-        if(reset&&session(k)){mark("SESSION_READ_BLOCK","key="+k);return "";} Object o=c.proceed(); if(session(k))mark("SESSION_READ",k+"="+TraceRecorder.safe(o)); return o;});
-      } else if(n.startsWith("put")||n.startsWith("set")||n.startsWith("encode")||n.equals("remove")){hook(m).intercept(c->{String k=String.valueOf(c.getArg(0));if(session(k)||k.contains("store_key_"))mark("STORE_WRITE","method="+n+" key="+k);return c.proceed();});}
+        if(reset&&session(k)){mark("SESSION_READ_BLOCK","key=")+);return "";} Object o=c.proceed(); if(session(k))mark("SESSION_READ",k+"="+TraceRecorder.safe(o)); return o;});
+      } else if(n.startsWith("put")||n.startsWith("set")||n.startsWith("encode")||n.equals("remove")){hook(m).intercept(c->{String k=String.valueOf(c.getArg(0));if(session(k)||k.contains("store_key_"))mark("STORE_WRITE","method="+n+" key=")+);return c.proceed();});}
     }
   }catch(ClassNotFoundException e){mark("HOOK_SKIP","MStore");}catch(Throwable e){fail("MStore",e);}}
 
