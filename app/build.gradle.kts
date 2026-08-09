@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.dnl.appenv.pro"
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.dnl.appenv.pro"
@@ -44,6 +44,6 @@ android {
 }
 
 dependencies {
-    compileOnly("io.github.libxposed:api:102.0.0")
-    implementation("io.github.libxposed:service:102.0.0")
+    compileOnly("io.github.libxposed:api:101.0.1")
+    implementation("io.github.libxposed:service:101.0.0")
 }
