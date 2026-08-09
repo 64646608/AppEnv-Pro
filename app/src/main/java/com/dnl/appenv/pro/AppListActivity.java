@@ -190,7 +190,7 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         content.setPadding(dp(24), dp(16), dp(24), dp(30));
         scroll.addView(content);
 
-        TextView version = text("1.0.1-dev · core 0.002", 16f, Color.DKGRAY);
+        TextView version = text("1.0.2-dev · core 0.003", 16f, Color.DKGRAY);
         content.addView(version, matchWrap());
 
         TextView status = text(buildFrameworkStatus(), 15f, Color.rgb(55, 55, 64));
@@ -203,7 +203,9 @@ public final class AppListActivity extends Activity implements AppEnvApplication
                 + "• 打开右侧开关后，该 App 自动置顶。\n"
                 + "• 未启用 App 按首次安装时间从新到旧排序。\n"
                 + "• 点击应用卡片进入变量详情，可生成下一套测试身份。\n"
-                + "• 日志关键词：DNLAPPENV", 15f, Color.rgb(70, 70, 78));
+                + "• core 0.003 默认记录 Native账号链 + main/index 请求/响应。\n"
+                + "• 默认自动打开兼容游戏的原调试入口。\n"
+                + "• 日志关键词：DNLAPPENV / DNLHTTP", 15f, Color.rgb(70, 70, 78));
         content.addView(help, matchWrap());
         pageHost.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
@@ -254,6 +256,24 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         });
         content.addView(enabled, cardLayoutParams());
 
+        if (!isSelf) {
+            Switch trace = new Switch(this);
+            trace.setText("记录完整请求 / 响应");
+            trace.setTextSize(16f);
+            trace.setChecked(readBool(entry.packageName, "traceEnabled", true));
+            trace.setPadding(dp(12), dp(10), dp(12), dp(10));
+            trace.setOnCheckedChangeListener((v, checked) -> writeBool(entry.packageName, "traceEnabled", checked));
+            content.addView(trace, cardLayoutParams());
+
+            Switch debug = new Switch(this);
+            debug.setText("自动打开原调试模式");
+            debug.setTextSize(16f);
+            debug.setChecked(readBool(entry.packageName, "debugEnabled", true));
+            debug.setPadding(dp(12), dp(10), dp(12), dp(10));
+            debug.setOnCheckedChangeListener((v, checked) -> writeBool(entry.packageName, "debugEnabled", checked));
+            content.addView(debug, cardLayoutParams());
+        }
+
         long generation = readGeneration(entry.packageName);
         TextView generationView = text("当前身份代次：" + generation, 15f, Color.rgb(65, 65, 75));
         generationView.setPadding(dp(12), dp(12), dp(12), dp(4));
@@ -276,11 +296,13 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         });
         content.addView(rotate, cardLayoutParams());
 
-        TextView info = text("\n当前 core 0.002：\n"
-                + "• Android ID：通用 Framework Hook\n"
-                + "• com.zygote.*：OAID/deviceId/AppInfo 兼容\n"
-                + "• 新身份代次：隐藏旧登录会话，并等待游客注册重新执行\n"
-                + "• Register Gate 日志：DNLAPPENV_REGISTER_GATE_*", 14f,
+        TextView info = text("\ncore 0.003 全链路追踪：\n"
+                + "• Android ID / OAID / deviceId 身份 Hook\n"
+                + "• 新身份：AppCache.User.clearLoginCache + MStore/MMKV 会话清理\n"
+                + "• StepRegisterGuest / MNet.register / bindWechat 时间线\n"
+                + "• JSFunction.getCommentInfo / loginWeChat / blackBox 桥接日志\n"
+                + "• 解密当前 main/index，并记录 XMLHttpRequest 请求与响应\n"
+                + "• 日志目录：Android/data/<包名>/files/AppEnvPro/trace/", 14f,
                 Color.rgb(85, 85, 95));
         content.addView(info, matchWrap());
 
@@ -487,6 +509,20 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         } catch (Throwable t) {
             return 0L;
         }
+    }
+
+    private boolean readBool(String pkg, String suffix, boolean def) {
+        if (service == null) return def;
+        try { return service.getRemotePreferences(PREF_GROUP).getBoolean(pkg + "." + suffix, def); }
+        catch (Throwable t) { return def; }
+    }
+
+    private void writeBool(String pkg, String suffix, boolean value) {
+        if (service == null) { toast("Xposed Service 尚未连接"); return; }
+        try {
+            service.getRemotePreferences(PREF_GROUP).edit().putBoolean(pkg + "." + suffix, value).commit();
+            toast((value ? "已开启：" : "已关闭：") + suffix + "；重启目标 App 后生效");
+        } catch (Throwable t) { toast("保存设置失败：" + t.getMessage()); }
     }
 
     private String buildFrameworkStatus() {
