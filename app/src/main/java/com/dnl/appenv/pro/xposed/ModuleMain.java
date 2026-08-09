@@ -3,427 +3,101 @@ package com.dnl.appenv.pro.xposed;
 import android.app.Application;
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.provider.Settings;
 import android.util.Log;
-
 import com.dnl.appenv.pro.core.Identity;
 import com.dnl.appenv.pro.core.IdentityStore;
-
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
-
 import io.github.libxposed.api.XposedModule;
 
 public final class ModuleMain extends XposedModule {
-    private static final String TAG = "AppEnvPro";
-    private static final String PREF_GROUP = "appenv";
+  static final String TAG="AppEnvPro", PREF="appenv", SEARCH="HotUpdateSearchPaths";
+  static final Set<String> SK=Set.of("key_is_login","user_login_accesskey","user_temp_accesskey");
+  volatile String pkg,override=""; volatile Context ctx; volatile Identity ident; volatile long gen; volatile boolean reset;
 
-    private static final Set<String> SESSION_KEYS = Set.of(
-            "key_is_login",
-            "user_login_accesskey",
-            "user_temp_accesskey"
-    );
+  @Override public void onModuleLoaded(ModuleLoadedParam p){
+    log(Log.INFO,TAG,"DNLAPPENV_MODULE_LOADED process="+p.getProcessName()+" framework="+getFrameworkName()+" version="+getFrameworkVersion()+" api="+getApiVersion());
+  }
+  @Override public void onPackageLoaded(PackageLoadedParam p){
+    if(!p.isFirstPackage())return; String n=p.getPackageName(); if(!bool(n,"enabled",false))return; pkg=n;
+    mark("ENTRY","package="+n+" process="+p.getProcessName()); searchHook(p.getDefaultClassLoader()); attachHook(p.getDefaultClassLoader());
+  }
+  boolean bool(String p,String k,boolean d){try{return getRemotePreferences(PREF).getBoolean(p+"."+k,d);}catch(Throwable t){return d;}}
+  long generation(String p){try{return getRemotePreferences(PREF).getLong(p+".generation",0L);}catch(Throwable t){return 0L;}}
 
-    private final AtomicBoolean attachHookInstalled = new AtomicBoolean(false);
-    private final AtomicBoolean runtimeHooksInstalled = new AtomicBoolean(false);
-    private volatile String activePackage;
-    private volatile Identity activeIdentity;
-    private volatile Context activeContext;
-    private volatile long activeGeneration;
-    private volatile boolean sessionResetPending;
+  void attachHook(ClassLoader cl){try{
+    Method m=Application.class.getDeclaredMethod("attach",Context.class); m.setAccessible(true);
+    hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{
+      ctx=(Context)c.getArg(0); if(pkg==null)pkg=ctx.getPackageName(); gen=generation(pkg); ident=IdentityStore.getOrCreate(ctx,gen); reset=IdentityStore.isSessionResetPending(ctx,gen);
+      TraceRecorder.init(ctx,pkg,gen,ident); mark("IDENTITY_READY","gen="+gen+" reset="+reset+" identity="+ident);
+      CocosTraceBootstrap.Result b=CocosTraceBootstrap.prepare(ctx,pkg,cl,bool(pkg,"traceEnabled",true),bool(pkg,"debugEnabled",true)); if(b.ready)override=b.overrideRoot;
+      mark("JSC_BOOT","ready="+b.ready+" source="+b.source+" debugPatch="+b.debugPatchCount+" trace="+b.traceInjected+" file="+b.traceFile+" message="+b.message);
+      runtime(cl); return c.proceed();
+    });
+  }catch(Throwable t){fail("Application.attach",t);}}
 
-    @Override
-    public void onModuleLoaded(ModuleLoadedParam param) {
-        log(Log.INFO, TAG, "DNLAPPENV_MODULE_LOADED process=" + param.getProcessName()
-                + " framework=" + getFrameworkName()
-                + " version=" + getFrameworkVersion()
-                + " api=" + getApiVersion());
+  void runtime(ClassLoader cl){
+    settings(Settings.Secure.class); settings(Settings.System.class); mstore(cl); appCache(cl);
+    getter(cl,"com.zygote.base.library.tool.MDevice","getOaid",()->id().oaid); getter(cl,"com.zygote.base.library.tool.MDevice","getAndroidId",()->id().androidId); getter(cl,"com.zygote.base.library.tool.MDevice","getDeviceId",()->id().deviceId);
+    getter(cl,"com.zygote.app.AppInfoImpl","oaid",()->id().oaid); getter(cl,"com.zygote.app.AppInfoImpl","androidId",()->id().androidId); getter(cl,"com.zygote.app.AppInfoImpl","deviceId",()->id().deviceId);
+    step(cl); mnet(cl); mapBoundary(); jsBridge(cl); mark("RUNTIME_READY","package="+pkg);
+  }
+  Identity id(){if(ident==null)throw new IllegalStateException("identity not ready"); return ident;}
+
+  void settings(Class<?> t){try{Method m=t.getDeclaredMethod("getString",ContentResolver.class,String.class); hook(m).intercept(c->{
+    if(Settings.Secure.ANDROID_ID.equals(String.valueOf(c.getArg(1)))){mark("ANDROID_ID","value="+id().androidId);return id().androidId;}return c.proceed();});
+  }catch(Throwable e){fail("Settings.getString",e);}}
+
+  void mstore(ClassLoader cl){try{Class<?> t=Class.forName("com.zygote.base.library.tool.MStore",false,cl);
+    for(Method m:t.getDeclaredMethods()){if(m.getParameterCount()<1||m.getParameterTypes()[0]!=String.class)continue; String n=m.getName(); m.setAccessible(true);
+      if((n.startsWith("get")||n.startsWith("decode"))&&(m.getReturnType()==String.class||CharSequence.class.isAssignableFrom(m.getReturnType()))){hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{
+        String k=String.valueOf(c.getArg(0)); if(k.endsWith("store_key_oaid")){mark("MSTORE_ID","oaid="+id().oaid);return id().oaid;} if(k.endsWith("store_key_android_id")){mark("MSTORE_ID","androidId="+id().androidId);return id().androidId;}
+        if(reset&&session(k)){mark("SESSION_READ_BLOCK","key="+k);return "";} Object o=c.proceed(); if(session(k))mark("SESSION_READ",k+"="+TraceRecorder.safe(o)); return o;});
+      } else if(n.startsWith("put")||n.startsWith("set")||n.startsWith("encode")||n.equals("remove")){hook(m).intercept(c->{String k=String.valueOf(c.getArg(0));if(session(k)||k.contains("store_key_"))mark("STORE_WRITE","method="+n+" key="+k);return c.proceed();});}
     }
+  }catch(ClassNotFoundException e){mark("HOOK_SKIP","MStore");}catch(Throwable e){fail("MStore",e);}}
 
-    @Override
-    public void onPackageLoaded(PackageLoadedParam param) {
-        if (!param.isFirstPackage()) {
-            return;
-        }
+  void appCache(ClassLoader cl){try{Class<?> t=Class.forName("com.zygote.base.business.cache.AppCache$User",false,cl);for(Method m:t.getDeclaredMethods())if(m.getName().equals("getAccesskey")&&m.getParameterCount()==0){m.setAccessible(true);hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{if(reset){mark("APPCACHE_BLOCK","accessKey");return "";}Object o=c.proceed();mark("APPCACHE_ACCESS",TraceRecorder.safe(o));return o;});}}
+  catch(ClassNotFoundException e){mark("HOOK_SKIP","AppCache.User");}catch(Throwable e){fail("AppCache.User",e);}}
 
-        String pkg = param.getPackageName();
-        if (!isEnabled(pkg)) {
-            return;
-        }
+  void step(ClassLoader cl){try{Class<?> t=Class.forName("com.zygote.base.business.enter.after.StepRegisterGuest",false,cl);for(Method m:t.getDeclaredMethods())if(m.getName().equals("doStep")){m.setAccessible(true);hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{if(reset)clear(cl);TraceRecorder.block("STEP_REGISTER BEFORE",snapshot(cl));Object o=c.proceed();TraceRecorder.block("STEP_REGISTER AFTER",snapshot(cl));return o;});}}
+  catch(ClassNotFoundException e){mark("HOOK_SKIP","StepRegisterGuest");}catch(Throwable e){fail("StepRegisterGuest",e);}}
 
-        activePackage = pkg;
-        log(Log.INFO, TAG, "DNLAPPENV_ENTRY package=" + pkg);
-        installAttachGate(param.getDefaultClassLoader());
-    }
+  void mnet(ClassLoader cl){try{Class<?> t=Class.forName("com.zygote.base.business.net.request.MNet",false,cl);for(Method m:t.getDeclaredMethods()){String n=m.getName();if(!n.equals("register")&&!n.equals("bindWechat"))continue;m.setAccessible(true);hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{
+    if(n.equals("register")&&reset)clear(cl); TraceRecorder.block("MNET "+n+" BEFORE","args="+args(c,m.getParameterCount())+"\n"+snapshot(cl)+"\nidentity="+id());
+    Object o;try{o=c.proceed();}catch(Throwable x){TraceRecorder.block("MNET "+n+" THROW",String.valueOf(x));throw x;}
+    TraceRecorder.block("MNET "+n+" RETURN","return="+TraceRecorder.safe(o)+"\n"+snapshot(cl)); if(n.equals("register")&&reset&&ctx!=null){IdentityStore.markSessionResetConsumed(ctx,gen);reset=false;mark("SESSION_RESET_CONSUMED","gen="+gen);}return o;
+  });}mark("HOOK_OK","MNet");}catch(ClassNotFoundException e){mark("HOOK_SKIP","MNet");}catch(Throwable e){fail("MNet",e);}}
 
-    private boolean isEnabled(String pkg) {
-        try {
-            SharedPreferences p = getRemotePreferences(PREF_GROUP);
-            return p.getBoolean(pkg + ".enabled", false);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "DNLAPPENV_REMOTE_PREFS_UNAVAILABLE package=" + pkg, t);
-            return false;
-        }
-    }
+  void mapBoundary(){try{Method m=java.util.HashMap.class.getDeclaredMethod("put",Object.class,Object.class);hook(m).intercept(c->{if(inMnet()){Object k=c.getArg(0),v=c.getArg(1);TraceRecorder.log("MNET-PAYLOAD","put "+TraceRecorder.safe(k)+"="+TraceRecorder.safe(v));if("oaid".equals(String.valueOf(k))&&!id().oaid.equals(String.valueOf(v)))mark("OAID_MISMATCH","expected="+id().oaid+" actual="+v);}return c.proceed();});}catch(Throwable e){fail("HashMap.put",e);}}
+  boolean inMnet(){for(StackTraceElement e:Thread.currentThread().getStackTrace())if(e.getClassName().equals("com.zygote.base.business.net.request.MNet")&&(e.getMethodName().equals("register")||e.getMethodName().equals("bindWechat")))return true;return false;}
 
-    private long requestedGeneration(String pkg) {
-        try {
-            return getRemotePreferences(PREF_GROUP).getLong(pkg + ".generation", 0L);
-        } catch (Throwable t) {
-            return 0L;
-        }
-    }
+  void jsBridge(ClassLoader cl){try{Class<?> t=Class.forName("org.cocos2dx.javascript.bridge.JSFunction",false,cl);for(Method m:t.getDeclaredMethods()){String n=m.getName(),l=n.toLowerCase(Locale.ROOT);if(!n.equals("getCommentInfo")&&!n.equals("loginWeChat")&&!n.equals("reLoginDialog")&&!l.contains("blackbox"))continue;m.setAccessible(true);hook(m).intercept(c->{TraceRecorder.block("JS-BRIDGE "+n+" ENTER",args(c,m.getParameterCount()));Object o=c.proceed();TraceRecorder.block("JS-BRIDGE "+n+" RETURN",TraceRecorder.safe(o));return o;});}mark("HOOK_OK","JSFunction");}catch(ClassNotFoundException e){mark("HOOK_SKIP","JSFunction");}catch(Throwable e){fail("JSFunction",e);}}
 
-    private void installAttachGate(ClassLoader classLoader) {
-        if (!attachHookInstalled.compareAndSet(false, true)) {
-            return;
-        }
-        try {
-            Method attach = Application.class.getDeclaredMethod("attach", Context.class);
-            attach.setAccessible(true);
-            hook(attach)
-                    .setPriority(PRIORITY_HIGHEST)
-                    .intercept(chain -> {
-                        Context context = (Context) chain.getArg(0);
-                        String pkg = activePackage != null ? activePackage : context.getPackageName();
-                        long generation = requestedGeneration(pkg);
+  void searchHook(ClassLoader cl){try{Class<?> t=Class.forName("org.cocos2dx.lib.Cocos2dxLocalStorage",false,cl);for(Method m:t.getDeclaredMethods()){if(m.getParameterCount()<1||m.getParameterTypes()[0]!=String.class)continue;String n=m.getName();m.setAccessible(true);if(n.equals("getItem")&&(m.getReturnType()==String.class||CharSequence.class.isAssignableFrom(m.getReturnType()))){hook(m).setPriority(PRIORITY_HIGHEST).intercept(c->{Object o=c.proceed();if(SEARCH.equals(String.valueOf(c.getArg(0)))&&!override.isEmpty()){String v=CocosTraceBootstrap.mergeSearchPaths(override,o==null?"":String.valueOf(o));mark("SEARCH_PATH_GET",v);return v;}return o;});}else if(n.equals("setItem")||n.equals("removeItem")){hook(m).intercept(c->{if(SEARCH.equals(String.valueOf(c.getArg(0))))mark("SEARCH_PATH_"+n,args(c,m.getParameterCount()));return c.proceed();});}}}
+  catch(ClassNotFoundException ignored){}catch(Throwable e){fail("Cocos2dxLocalStorage",e);}}
 
-                        activeContext = context;
-                        activeGeneration = generation;
-                        activeIdentity = IdentityStore.getOrCreate(context, generation);
-                        sessionResetPending = IdentityStore.isSessionResetPending(context, generation);
+  void clear(ClassLoader cl){mark("SESSION_RESET_BEGIN",snapshot(cl));int n=0;
+    try{Class<?> t=Class.forName("com.zygote.base.business.cache.AppCache$User",true,cl);Object u=instance(t);Method m=t.getDeclaredMethod("clearLoginCache");m.setAccessible(true);m.invoke(u);mark("SESSION_RESET","AppCache.clearLoginCache ok");}catch(Throwable e){TraceRecorder.log("SESSION-RESET","AppCache: "+e);}
+    try{Class<?> t=Class.forName("com.zygote.base.library.tool.MStore",true,cl);Object s=instance(t);Method m=t.getDeclaredMethod("remove",String.class);m.setAccessible(true);for(String k:SK){m.invoke(s,k);n++;}}catch(Throwable e){TraceRecorder.log("SESSION-RESET","MStore: "+e);}
+    try{Class<?> t=Class.forName("com.tencent.mmkv.MMKV",true,cl);Method d=t.getDeclaredMethod("defaultMMKV");d.setAccessible(true);Object x=d.invoke(null);if(x!=null){Method m=t.getDeclaredMethod("removeValueForKey",String.class);m.setAccessible(true);for(String k:SK){m.invoke(x,k);n++;}}}catch(Throwable e){TraceRecorder.log("SESSION-RESET","MMKV: "+e);}
+    mark("SESSION_RESET_DONE","removed="+n+" "+snapshot(cl));
+  }
 
-                        log(Log.INFO, TAG, "DNLAPPENV_IDENTITY_READY package=" + pkg
-                                + " sessionResetPending=" + sessionResetPending
-                                + " " + activeIdentity);
+  String snapshot(ClassLoader cl){String a="",u="",anon="";try{Class<?> t=Class.forName("com.zygote.base.business.cache.AppCache$User",true,cl);Object x=instance(t);a=str(t,x,"getAccesskey");u=first(str(t,x,"getUserId"),str(t,x,"getUserid"),uid(a));Object q=call(t,x,"isAnonymous");if(q==null)q=call(t,x,"getAnonymous");if(q!=null)anon=String.valueOf(q);}catch(Throwable ignored){}return "userId="+empty(u)+" accessKey="+empty(a)+" isAnonymous="+empty(anon)+" resetPending="+reset;}
+  Object instance(Class<?> t)throws Exception{Field f=t.getDeclaredField("INSTANCE");f.setAccessible(true);return f.get(null);}
+  Object call(Class<?> t,Object x,String n){try{Method m=t.getDeclaredMethod(n);m.setAccessible(true);return m.invoke(x);}catch(Throwable e){return null;}}
+  String str(Class<?> t,Object x,String n){Object v=call(t,x,n);return v instanceof String?(String)v:"";}
+  String uid(String a){if(a==null)return "";int i=a.lastIndexOf('_');return i>=0&&i+1<a.length()?a.substring(i+1):"";}
+  String first(String...v){if(v!=null)for(String x:v)if(x!=null&&!x.isEmpty())return x;return "";} String empty(String v){return v==null||v.isEmpty()?"<empty>":v;}
 
-                        installRuntimeHooks(classLoader);
-                        return chain.proceed();
-                    });
-            log(Log.INFO, TAG, "DNLAPPENV_ATTACH_GATE_OK package=" + activePackage);
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_ATTACH_GATE_FAIL package=" + activePackage, t);
-        }
-    }
-
-    private void installRuntimeHooks(ClassLoader classLoader) {
-        if (!runtimeHooksInstalled.compareAndSet(false, true)) {
-            return;
-        }
-
-        hookAndroidId();
-        hookSessionStore(classLoader);
-
-        hookStringNoArgs(classLoader,
-                "com.zygote.base.library.tool.MDevice", "getOaid",
-                () -> identity().oaid);
-        hookStringNoArgs(classLoader,
-                "com.zygote.base.library.tool.MDevice", "getAndroidId",
-                () -> identity().androidId);
-        hookStringNoArgs(classLoader,
-                "com.zygote.base.library.tool.MDevice", "getDeviceId",
-                () -> identity().deviceId);
-
-        hookStringNoArgs(classLoader,
-                "com.zygote.app.AppInfoImpl", "oaid",
-                () -> identity().oaid);
-        hookStringNoArgs(classLoader,
-                "com.zygote.app.AppInfoImpl", "deviceId",
-                () -> identity().deviceId);
-        hookStringNoArgs(classLoader,
-                "com.zygote.app.AppInfoImpl", "androidId",
-                () -> identity().androidId);
-
-        hookStepRegisterGuest(classLoader);
-        hookRegisterGate(classLoader);
-        hookTraceByName(classLoader,
-                "com.zygote.base.business.net.request.MNet", "bindWechat",
-                "DNLAPPENV_BIND_WECHAT_CALL");
-
-        log(Log.INFO, TAG, "DNLAPPENV_RUNTIME_HOOKS_READY package=" + activePackage);
-    }
-
-    private Identity identity() {
-        Identity id = activeIdentity;
-        if (id == null) {
-            throw new IllegalStateException("identity not initialized");
-        }
-        return id;
-    }
-
-    private void hookAndroidId() {
-        hookSettingsGetString(Settings.Secure.class, "Secure");
-        hookSettingsGetString(Settings.System.class, "System");
-    }
-
-    private void hookSettingsGetString(Class<?> settingsClass, String label) {
-        try {
-            Method m = settingsClass.getDeclaredMethod(
-                    "getString", ContentResolver.class, String.class);
-            hook(m).intercept(chain -> {
-                Object key = chain.getArg(1);
-                if (Settings.Secure.ANDROID_ID.equals(key)) {
-                    String value = identity().androidId;
-                    log(Log.INFO, TAG, "DNLAPPENV_GET_ANDROID_ID source=" + label + " value=" + value);
-                    return value;
-                }
-                return chain.proceed();
-            });
-            log(Log.INFO, TAG, "DNLAPPENV_HOOK_OK target=Settings." + label + ".getString");
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "DNLAPPENV_HOOK_MISS target=Settings." + label + ".getString", t);
-        }
-    }
-
-    private void hookSessionStore(ClassLoader classLoader) {
-        String className = "com.zygote.base.library.tool.MStore";
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int getterCount = 0;
-            int setterCount = 0;
-
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (method.getParameterCount() < 1 || method.getParameterTypes()[0] != String.class) {
-                    continue;
-                }
-                String name = method.getName();
-                method.setAccessible(true);
-
-                if (name.startsWith("get") || name.startsWith("decode") || name.equals("contains")) {
-                    Class<?> returnType = method.getReturnType();
-                    hook(method).setPriority(PRIORITY_HIGHEST).intercept(chain -> {
-                        String key = String.valueOf(chain.getArg(0));
-                        if (sessionResetPending && isSessionKey(key)) {
-                            Object hidden = emptyValue(returnType);
-                            log(Log.INFO, TAG, "DNLAPPENV_SESSION_READ_BLOCK key=" + key
-                                    + " method=" + method.getName());
-                            return hidden;
-                        }
-                        return chain.proceed();
-                    });
-                    getterCount++;
-                } else if (name.startsWith("put") || name.startsWith("set") || name.startsWith("encode")) {
-                    Class<?> returnType = method.getReturnType();
-                    hook(method).setPriority(PRIORITY_HIGHEST).intercept(chain -> {
-                        String key = String.valueOf(chain.getArg(0));
-                        if (sessionResetPending && isSessionKey(key)) {
-                            log(Log.INFO, TAG, "DNLAPPENV_SESSION_WRITE_BLOCK key=" + key
-                                    + " method=" + method.getName());
-                            return emptyValue(returnType);
-                        }
-                        return chain.proceed();
-                    });
-                    setterCount++;
-                }
-            }
-
-            log(Log.INFO, TAG, "DNLAPPENV_SESSION_STORE_HOOK_OK getters=" + getterCount
-                    + " setters=" + setterCount);
-        } catch (ClassNotFoundException e) {
-            log(Log.INFO, TAG, "DNLAPPENV_SESSION_STORE_SKIP reason=class_not_found");
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_SESSION_STORE_HOOK_FAIL", t);
-        }
-    }
-
-    private void hookStepRegisterGuest(ClassLoader classLoader) {
-        String className = "com.zygote.base.business.enter.after.StepRegisterGuest";
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int count = 0;
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (!method.getName().equals("doStep")) continue;
-                method.setAccessible(true);
-                hook(method).setPriority(PRIORITY_HIGHEST).intercept(chain -> {
-                    if (sessionResetPending) {
-                        clearSessionStoreNow(classLoader);
-                        log(Log.INFO, TAG, "DNLAPPENV_REGISTER_GATE_PRE package=" + activePackage
-                                + " generation=" + activeGeneration
-                                + " oaid=" + identity().oaid
-                                + " androidId=" + identity().androidId);
-                    } else {
-                        log(Log.INFO, TAG, "DNLAPPENV_STEP_REGISTER_CALL package=" + activePackage
-                                + " resetPending=false");
-                    }
-                    return chain.proceed();
-                });
-                count++;
-            }
-            log(Log.INFO, TAG, "DNLAPPENV_REGISTER_STEP_HOOK count=" + count);
-        } catch (ClassNotFoundException e) {
-            log(Log.INFO, TAG, "DNLAPPENV_REGISTER_STEP_SKIP reason=class_not_found");
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_REGISTER_STEP_FAIL", t);
-        }
-    }
-
-    private void hookRegisterGate(ClassLoader classLoader) {
-        String className = "com.zygote.base.business.net.request.MNet";
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int count = 0;
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (!method.getName().equals("register")) continue;
-                method.setAccessible(true);
-                hook(method).setPriority(PRIORITY_HIGHEST).intercept(chain -> {
-                    boolean consumeReset = sessionResetPending;
-                    if (consumeReset) {
-                        clearSessionStoreNow(classLoader);
-                        log(Log.INFO, TAG, "DNLAPPENV_REGISTER_GATE_PASS package=" + activePackage
-                                + " generation=" + activeGeneration
-                                + " oaid=" + identity().oaid
-                                + " deviceId=" + identity().deviceId
-                                + " androidId=" + identity().androidId);
-                    } else {
-                        log(Log.INFO, TAG, "DNLAPPENV_REGISTER_CALL package=" + activePackage
-                                + " resetPending=false");
-                    }
-
-                    Object result = chain.proceed();
-
-                    if (consumeReset && activeContext != null) {
-                        IdentityStore.markSessionResetConsumed(activeContext, activeGeneration);
-                        sessionResetPending = false;
-                        log(Log.INFO, TAG, "DNLAPPENV_SESSION_RESET_CONSUMED package=" + activePackage
-                                + " generation=" + activeGeneration);
-                    }
-                    return result;
-                });
-                count++;
-            }
-            log(Log.INFO, TAG, "DNLAPPENV_REGISTER_GATE_HOOK count=" + count);
-        } catch (ClassNotFoundException e) {
-            log(Log.INFO, TAG, "DNLAPPENV_REGISTER_GATE_SKIP reason=class_not_found");
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_REGISTER_GATE_FAIL", t);
-        }
-    }
-
-    private void clearSessionStoreNow(ClassLoader classLoader) {
-        String className = "com.zygote.base.library.tool.MStore";
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int removed = 0;
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (!method.getName().equals("remove")
-                        || method.getParameterCount() != 1
-                        || method.getParameterTypes()[0] != String.class
-                        || !Modifier.isStatic(method.getModifiers())) {
-                    continue;
-                }
-                method.setAccessible(true);
-                for (String key : SESSION_KEYS) {
-                    try {
-                        method.invoke(null, key);
-                        removed++;
-                    } catch (Throwable one) {
-                        log(Log.WARN, TAG, "DNLAPPENV_SESSION_REMOVE_FAIL key=" + key, one);
-                    }
-                }
-            }
-            log(Log.INFO, TAG, "DNLAPPENV_SESSION_REMOVE_DONE count=" + removed);
-        } catch (Throwable t) {
-            log(Log.WARN, TAG, "DNLAPPENV_SESSION_REMOVE_UNAVAILABLE", t);
-        }
-    }
-
-    private boolean isSessionKey(String key) {
-        if (key == null) return false;
-        String normalized = key.toLowerCase(Locale.ROOT);
-        for (String sessionKey : SESSION_KEYS) {
-            if (normalized.equals(sessionKey) || normalized.endsWith(sessionKey)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private Object emptyValue(Class<?> type) {
-        if (type == void.class || type == Void.class) return null;
-        if (type == boolean.class || type == Boolean.class) return false;
-        if (type == byte.class || type == Byte.class) return (byte) 0;
-        if (type == short.class || type == Short.class) return (short) 0;
-        if (type == int.class || type == Integer.class) return 0;
-        if (type == long.class || type == Long.class) return 0L;
-        if (type == float.class || type == Float.class) return 0f;
-        if (type == double.class || type == Double.class) return 0d;
-        if (type == char.class || type == Character.class) return '\0';
-        if (type == String.class || CharSequence.class.isAssignableFrom(type)) return "";
-        return null;
-    }
-
-    private void hookStringNoArgs(ClassLoader classLoader,
-                                  String className,
-                                  String methodName,
-                                  Supplier<String> valueSupplier) {
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int count = 0;
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (!method.getName().equals(methodName) || method.getParameterCount() != 0) {
-                    continue;
-                }
-                if (method.getReturnType() != String.class
-                        && !CharSequence.class.isAssignableFrom(method.getReturnType())) {
-                    continue;
-                }
-                method.setAccessible(true);
-                hook(method).intercept(chain -> {
-                    String value = valueSupplier.get();
-                    log(Log.INFO, TAG, "DNLAPPENV_GETTER target=" + className + "." + methodName
-                            + " value=" + value);
-                    return value;
-                });
-                count++;
-            }
-            if (count > 0) {
-                log(Log.INFO, TAG, "DNLAPPENV_HOOK_OK target=" + className + "." + methodName
-                        + " count=" + count);
-            } else {
-                log(Log.WARN, TAG, "DNLAPPENV_HOOK_MISS target=" + className + "." + methodName
-                        + " reason=no_matching_method");
-            }
-        } catch (ClassNotFoundException e) {
-            log(Log.INFO, TAG, "DNLAPPENV_HOOK_SKIP target=" + className + "." + methodName
-                    + " reason=class_not_found");
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_HOOK_FAIL target=" + className + "." + methodName, t);
-        }
-    }
-
-    private void hookTraceByName(ClassLoader classLoader,
-                                 String className,
-                                 String methodName,
-                                 String marker) {
-        try {
-            Class<?> clazz = Class.forName(className, false, classLoader);
-            int count = 0;
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (!method.getName().equals(methodName)) {
-                    continue;
-                }
-                method.setAccessible(true);
-                hook(method).intercept(chain -> {
-                    Identity id = activeIdentity;
-                    log(Log.INFO, TAG, marker
-                            + " package=" + activePackage
-                            + " identity=" + (id == null ? "null" : id));
-                    return chain.proceed();
-                });
-                count++;
-            }
-            log(Log.INFO, TAG, "DNLAPPENV_TRACE_HOOK target=" + className + "." + methodName
-                    + " count=" + count);
-        } catch (ClassNotFoundException e) {
-            log(Log.INFO, TAG, "DNLAPPENV_TRACE_SKIP target=" + className + "." + methodName
-                    + " reason=class_not_found");
-        } catch (Throwable t) {
-            log(Log.ERROR, TAG, "DNLAPPENV_TRACE_FAIL target=" + className + "." + methodName, t);
-        }
-    }
+  void getter(ClassLoader cl,String cn,String mn,Supplier<String> s){try{Class<?> t=Class.forName(cn,false,cl);for(Method m:t.getDeclaredMethods())if(m.getName().equals(mn)&&m.getParameterCount()==0&&(m.getReturnType()==String.class||CharSequence.class.isAssignableFrom(m.getReturnType()))){m.setAccessible(true);hook(m).intercept(c->{String v=s.get();mark("IDENTITY_GETTER",cn+"."+mn+"="+v);return v;});}}catch(ClassNotFoundException ignored){}catch(Throwable e){fail(cn+"."+mn,e);}}
+  boolean session(String k){if(k==null)return false;String n=k.toLowerCase(Locale.ROOT);for(String s:SK)if(n.equals(s)||n.endsWith(s))return true;return false;}
+  String args(Object c,int count){Object[] v=new Object[count];try{Method g=c.getClass().getMethod("getArg",int.class);for(int i=0;i<count;i++)v[i]=g.invoke(c,i);}catch(Throwable ignored){}return TraceRecorder.args(v);}
+  void mark(String c,String m){try{log(Log.INFO,TAG,"DNLAPPENV_"+c+" "+m);}catch(Throwable ignored){}try{TraceRecorder.log(c,m);}catch(Throwable ignored){}}
+  void fail(String w,Throwable t){try{log(Log.WARN,TAG,"DNLAPPENV_HOOK_FAIL target="+w,t);}catch(Throwable ignored){}try{TraceRecorder.log("HOOK-FAIL",w+" "+t);}catch(Throwable ignored){}}
 }
