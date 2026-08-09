@@ -4,12 +4,8 @@ import android.app.Application;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
-
-import androidx.annotation.NonNull;
-import androidx.annotation.RequiresApi;
 
 import com.dnl.appenv.pro.core.Identity;
 import com.dnl.appenv.pro.core.IdentityStore;
@@ -35,7 +31,7 @@ public final class ModuleMain extends XposedModule {
     private volatile Identity activeIdentity;
 
     @Override
-    public void onModuleLoaded(@NonNull ModuleLoadedParam param) {
+    public void onModuleLoaded(ModuleLoadedParam param) {
         log(Log.INFO, TAG, "DNLAPPENV_MODULE_LOADED process=" + param.getProcessName()
                 + " framework=" + getFrameworkName()
                 + " version=" + getFrameworkVersion()
@@ -43,8 +39,7 @@ public final class ModuleMain extends XposedModule {
     }
 
     @Override
-    @RequiresApi(Build.VERSION_CODES.Q)
-    public void onPackageLoaded(@NonNull PackageLoadedParam param) {
+    public void onPackageLoaded(PackageLoadedParam param) {
         String pkg = param.getPackageName();
         if (!TARGETS.contains(pkg) || !param.isFirstPackage()) {
             return;
