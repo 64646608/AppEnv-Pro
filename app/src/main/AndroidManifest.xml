@@ -2,13 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
     <application
         android:name=".AppEnvApplication"
         android:allowBackup="false"
         android:label="应用变量 Pro"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
-        tools:ignore="MissingApplicationIcon">
+        tools:ignore="MissingApplicationIcon,QueryAllPackagesPermission">
 
         <activity
             android:name=".MainActivity"
