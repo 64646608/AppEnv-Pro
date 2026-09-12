@@ -31,6 +31,8 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import io.github.libxposed.service.XposedService;
 
@@ -51,6 +53,8 @@ public final class AppListActivity extends Activity implements AppEnvApplication
     private volatile boolean appScanInProgress;
     private volatile boolean appsLoaded;
     private int renderGeneration;
+    private final ExecutorService iconExecutor = Executors.newFixedThreadPool(2);
+    private Drawable fallbackIcon;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,6 +73,12 @@ public final class AppListActivity extends Activity implements AppEnvApplication
     protected void onStop() {
         AppEnvApplication.removeServiceStateListener(this);
         super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        iconExecutor.shutdownNow();
+        super.onDestroy();
     }
 
     @Override
@@ -349,22 +359,17 @@ public final class AppListActivity extends Activity implements AppEnvApplication
                     if (info == null) continue;
 
                     String label;
-                    Drawable icon;
                     try {
                         CharSequence raw = pm.getApplicationLabel(info);
                         label = raw == null ? info.packageName : raw.toString();
                     } catch (Throwable t) {
                         label = info.packageName;
                     }
-                    try {
-                        icon = pm.getApplicationIcon(info);
-                    } catch (Throwable t) {
-                        icon = getApplicationInfo().loadIcon(pm);
-                    }
 
                     boolean enabled = Boolean.TRUE.equals(
                             remoteValues.get(info.packageName + ".enabled"));
-                    loaded.add(new AppEntry(label, info.packageName, icon, pi.firstInstallTime, enabled));
+                    // 图标不阻塞应用扫描；卡片出现后再由后台双线程渐进加载。
+                    loaded.add(new AppEntry(label, info.packageName, null, pi.firstInstallTime, enabled));
                 }
             } catch (Throwable t) {
                 failure = t;
@@ -403,7 +408,8 @@ public final class AppListActivity extends Activity implements AppEnvApplication
             }
 
             boolean changed = false;
-            for (AppEntry entry : allApps) {
+            List<AppEntry> snapshot = new ArrayList<>(allApps);
+            for (AppEntry entry : snapshot) {
                 boolean enabled = Boolean.TRUE.equals(values.get(entry.packageName + ".enabled"));
                 if (entry.enabled != enabled) {
                     entry.enabled = enabled;
@@ -476,7 +482,18 @@ public final class AppListActivity extends Activity implements AppEnvApplication
                 dp(20), Color.rgb(229, 229, 238), 1));
 
         ImageView icon = new ImageView(this);
-        icon.setImageDrawable(entry.icon);
+        icon.setTag(entry.packageName);
+        if (entry.icon != null) {
+            icon.setImageDrawable(entry.icon);
+        } else {
+            if (fallbackIcon == null) {
+                try {
+                    fallbackIcon = getApplicationInfo().loadIcon(getPackageManager());
+                } catch (Throwable ignored) { }
+            }
+            icon.setImageDrawable(fallbackIcon);
+            loadIconAsync(entry, icon);
+        }
         card.addView(icon, new LinearLayout.LayoutParams(dp(58), dp(58)));
 
         LinearLayout texts = new LinearLayout(this);
@@ -506,6 +523,36 @@ public final class AppListActivity extends Activity implements AppEnvApplication
 
         card.setOnClickListener(v -> showAppDetail(entry));
         return card;
+    }
+
+    private void loadIconAsync(AppEntry entry, ImageView target) {
+        synchronized (entry) {
+            if (entry.icon != null || entry.iconLoading) return;
+            entry.iconLoading = true;
+        }
+
+        try {
+            iconExecutor.execute(() -> {
+                Drawable loaded = null;
+                try {
+                    loaded = getPackageManager().getApplicationIcon(entry.packageName);
+                } catch (Throwable ignored) { }
+
+                entry.icon = loaded;
+                entry.iconLoading = false;
+                Drawable result = loaded;
+                if (result == null || isFinishing() || isDestroyed()) return;
+
+                runOnUiThread(() -> {
+                    Object tag = target.getTag();
+                    if (entry.packageName.equals(tag)) {
+                        target.setImageDrawable(result);
+                    }
+                });
+            });
+        } catch (Throwable ignored) {
+            entry.iconLoading = false;
+        }
     }
 
     private void enablePackage(AppEntry entry, Switch toggle) {
@@ -693,7 +740,8 @@ public final class AppListActivity extends Activity implements AppEnvApplication
     private static final class AppEntry {
         final String label;
         final String packageName;
-        final Drawable icon;
+        volatile Drawable icon;
+        volatile boolean iconLoading;
         final long installTime;
         boolean enabled;
 
