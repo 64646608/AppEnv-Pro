@@ -30,6 +30,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 import io.github.libxposed.service.XposedService;
 
@@ -47,6 +48,9 @@ public final class AppListActivity extends Activity implements AppEnvApplication
     private final List<AppEntry> allApps = new ArrayList<>();
     private String query = "";
     private AppEntry detailEntry;
+    private volatile boolean appScanInProgress;
+    private volatile boolean appsLoaded;
+    private int renderGeneration;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,7 +85,11 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         service = newService;
         runOnUiThread(() -> {
             updateFrameworkBadge();
-            if (detailEntry == null && appList != null) loadInstalledApps();
+            if (appsLoaded) {
+                refreshEnabledStates();
+            } else {
+                loadInstalledApps();
+            }
         });
     }
 
@@ -175,7 +183,11 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         scroll.addView(appList);
         pageHost.addView(scroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        loadInstalledApps();
+        if (appsLoaded) {
+            renderAppList();
+        } else {
+            loadInstalledApps();
+        }
     }
 
     private void showHomePage() {
@@ -190,7 +202,7 @@ public final class AppListActivity extends Activity implements AppEnvApplication
         content.setPadding(dp(24), dp(16), dp(24), dp(30));
         scroll.addView(content);
 
-        TextView version = text("1.0.2-dev · core 0.003", 16f, Color.DKGRAY);
+        TextView version = text("1.0.3-dev · core 0.003", 16f, Color.DKGRAY);
         content.addView(version, matchWrap());
 
         TextView status = text(buildFrameworkStatus(), 15f, Color.rgb(55, 55, 64));
@@ -312,20 +324,32 @@ public final class AppListActivity extends Activity implements AppEnvApplication
     }
 
     private void loadInstalledApps() {
+        if (appScanInProgress || appsLoaded) return;
+        appScanInProgress = true;
+
         new Thread(() -> {
             List<AppEntry> loaded = new ArrayList<>();
             PackageManager pm = getPackageManager();
-            SharedPreferences remote = null;
-            try {
-                if (service != null) remote = service.getRemotePreferences(PREF_GROUP);
-            } catch (Throwable ignored) { }
+            Map<String, ?> remoteValues = Collections.emptyMap();
 
             try {
-                List<ApplicationInfo> infos = pm.getInstalledApplications(PackageManager.GET_META_DATA);
-                for (ApplicationInfo info : infos) {
+                XposedService currentService = service;
+                if (currentService != null) {
+                    SharedPreferences remote = currentService.getRemotePreferences(PREF_GROUP);
+                    remoteValues = remote.getAll();
+                }
+            } catch (Throwable ignored) { }
+
+            Throwable failure = null;
+            try {
+                // 一次批量取得 PackageInfo，避免过去每个 App 再调用一次 getPackageInfo()。
+                List<PackageInfo> packages = pm.getInstalledPackages(PackageManager.GET_META_DATA);
+                for (PackageInfo pi : packages) {
+                    ApplicationInfo info = pi.applicationInfo;
+                    if (info == null) continue;
+
                     String label;
                     Drawable icon;
-                    long installTime = 0L;
                     try {
                         CharSequence raw = pm.getApplicationLabel(info);
                         label = raw == null ? info.packageName : raw.toString();
@@ -337,50 +361,108 @@ public final class AppListActivity extends Activity implements AppEnvApplication
                     } catch (Throwable t) {
                         icon = getApplicationInfo().loadIcon(pm);
                     }
-                    try {
-                        PackageInfo pi = pm.getPackageInfo(info.packageName, 0);
-                        installTime = pi.firstInstallTime;
-                    } catch (Throwable ignored) { }
 
-                    boolean enabled = false;
-                    if (remote != null) {
-                        try {
-                            enabled = remote.getBoolean(info.packageName + ".enabled", false);
-                        } catch (Throwable ignored) { }
-                    }
-                    loaded.add(new AppEntry(label, info.packageName, icon, installTime, enabled));
+                    boolean enabled = Boolean.TRUE.equals(
+                            remoteValues.get(info.packageName + ".enabled"));
+                    loaded.add(new AppEntry(label, info.packageName, icon, pi.firstInstallTime, enabled));
                 }
             } catch (Throwable t) {
-                runOnUiThread(() -> toast("读取应用列表失败：" + t.getMessage()));
+                failure = t;
             }
 
             Collections.sort(loaded, APP_COMPARATOR);
+            Throwable finalFailure = failure;
             runOnUiThread(() -> {
+                appScanInProgress = false;
+                if (finalFailure != null) {
+                    toast("读取应用列表失败：" + finalFailure.getMessage());
+                    return;
+                }
                 allApps.clear();
                 allApps.addAll(loaded);
-                renderAppList();
+                appsLoaded = true;
+                if (detailEntry == null && appList != null) renderAppList();
+
+                // 首次扫描时 Service 可能尚未连上；扫描完成后只刷新开关状态，
+                // 不再重新读取图标/标签/安装时间。
+                if (service != null) refreshEnabledStates();
             });
         }, "AppEnv-AppScanner").start();
     }
 
+    private void refreshEnabledStates() {
+        XposedService currentService = service;
+        if (currentService == null || !appsLoaded) return;
+
+        new Thread(() -> {
+            Map<String, ?> values;
+            try {
+                values = currentService.getRemotePreferences(PREF_GROUP).getAll();
+            } catch (Throwable ignored) {
+                return;
+            }
+
+            boolean changed = false;
+            for (AppEntry entry : allApps) {
+                boolean enabled = Boolean.TRUE.equals(values.get(entry.packageName + ".enabled"));
+                if (entry.enabled != enabled) {
+                    entry.enabled = enabled;
+                    changed = true;
+                }
+            }
+            if (!changed) return;
+
+            runOnUiThread(() -> {
+                Collections.sort(allApps, APP_COMPARATOR);
+                if (detailEntry == null && appList != null) renderAppList();
+            });
+        }, "AppEnv-StateRefresh").start();
+    }
+
     private void renderAppList() {
         if (appList == null) return;
+        final int generation = ++renderGeneration;
         appList.removeAllViews();
-        int visible = 0;
+
+        if (allApps.isEmpty()) {
+            TextView empty = text(appsLoaded ? "没有匹配的应用" : "正在读取已安装应用…",
+                    15f, Color.DKGRAY);
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(0, dp(40), 0, dp(40));
+            appList.addView(empty, matchWrap());
+            return;
+        }
+
+        List<AppEntry> visibleApps = new ArrayList<>();
         for (AppEntry entry : allApps) {
             if (!query.isEmpty()) {
                 String haystack = (entry.label + "\n" + entry.packageName).toLowerCase(Locale.ROOT);
                 if (!haystack.contains(query)) continue;
             }
-            appList.addView(buildAppCard(entry), cardLayoutParams());
-            visible++;
+            visibleApps.add(entry);
         }
-        if (visible == 0) {
-            TextView empty = text(allApps.isEmpty() ? "正在读取已安装应用…" : "没有匹配的应用",
-                    15f, Color.DKGRAY);
+
+        if (visibleApps.isEmpty()) {
+            TextView empty = text("没有匹配的应用", 15f, Color.DKGRAY);
             empty.setGravity(Gravity.CENTER);
             empty.setPadding(0, dp(40), 0, dp(40));
             appList.addView(empty, matchWrap());
+            return;
+        }
+
+        // 首批只创建 32 个卡片，让首屏尽快出现；其余卡片分批补齐，避免一次性
+        // 创建数百套 View 把 UI 线程堵住。
+        appendAppBatch(visibleApps, 0, generation);
+    }
+
+    private void appendAppBatch(List<AppEntry> entries, int start, int generation) {
+        if (appList == null || generation != renderGeneration) return;
+        int end = Math.min(start + 32, entries.size());
+        for (int i = start; i < end; i++) {
+            appList.addView(buildAppCard(entries.get(i)), cardLayoutParams());
+        }
+        if (end < entries.size()) {
+            appList.post(() -> appendAppBatch(entries, end, generation));
         }
     }
 
